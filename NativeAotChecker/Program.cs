@@ -12,6 +12,12 @@ bld.Services
 bld.Services.ConfigureHttpJsonOptions(o => o.SerializerOptions.TypeInfoResolverChain.Insert(0, AppJsonSerializerContext.Default));
 
 var app = bld.Build();
+
+// Register generic command handler for AOT - PR2 needs to make this AOT-compatible
+// This registers the open generic types - when executed, InitGenericHandler uses MakeGenericType
+// to create the closed types (e.g., GenericWrapperCommandHandler<string>), which fails in AOT
+app.Services.RegisterGenericCommand(typeof(GenericWrapperCommand<>), typeof(GenericWrapperCommandHandler<>));
+
 app.MapGet("healthy", () => Results.Ok());
 app.UseAuthentication()
    .UseAuthorization()

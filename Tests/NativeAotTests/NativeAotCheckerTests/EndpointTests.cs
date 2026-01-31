@@ -233,4 +233,36 @@ public class EndpointTests(App app)
         res.PostProcessorRan.ShouldBeTrue("Generic PostProcessor did not run - source generator factory missing?");
         res.Output.ShouldBe("Processed: Test Input");
     }
+
+    /// <summary>
+    /// Tests that generic command handlers work in AOT mode.
+    /// 
+    /// This test validates PR2 (Command Handler AOT support) - without source-generated factories
+    /// for generic command handlers, this test FAILS in AOT:
+    /// 
+    /// - RegisterGenericCommand registers open generic types: GenericWrapperCommand&lt;&gt; and GenericWrapperCommandHandler&lt;&gt;
+    /// - At runtime, InitGenericHandler uses MakeGenericType to close the handler type
+    /// - In AOT, MakeGenericType fails without proper code generation
+    /// - PR2's source generator produces factories for GenericWrapperCommandHandler&lt;string&gt;, etc.
+    /// 
+    /// Expected behavior with PR2:
+    /// - StringResult == "Wrapped String: Hello AOT" (generic handler instantiated for string)
+    /// - IntResult == "Wrapped Int32: 42" (generic handler instantiated for int)
+    /// 
+    /// Without PR2:
+    /// - InvalidOperationException: "Operation is not supported on this platform" from MakeGenericType
+    /// </summary>
+    [Fact]
+    public async Task Generic_Command_Handlers_Work_In_AOT_Mode()
+    {
+        var (rsp, res, err) = await app.Client.GETAsync<GenericCommandEndpoint, GenericCommandResponse>();
+
+        if (!rsp.IsSuccessStatusCode)
+            Assert.Fail(err);
+
+        // These assertions validate that PR2's source generator correctly produced factories
+        // for the generic command handler closed over different type arguments
+        res.StringResult.ShouldBe("Wrapped String: Hello AOT", "Generic command handler<string> failed");
+        res.IntResult.ShouldBe("Wrapped Int32: 42", "Generic command handler<int> failed");
+    }
 }
