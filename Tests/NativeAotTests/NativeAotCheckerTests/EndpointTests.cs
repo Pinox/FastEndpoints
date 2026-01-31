@@ -227,10 +227,19 @@ public class EndpointTests(App app)
         if (!rsp.IsSuccessStatusCode)
             Assert.Fail(err);
 
-        // These assertions validate that the source generator correctly produced factories
-        // for the open generic processors. Without PR1, both would be false.
+        // The PreProcessor runs BEFORE HandleAsync, so it can set flags on the request
+        // that are then copied to the response. This validates the source generator factory works.
         res.PreProcessorRan.ShouldBeTrue("Generic PreProcessor did not run - source generator factory missing?");
-        res.PostProcessorRan.ShouldBeTrue("Generic PostProcessor did not run - source generator factory missing?");
         res.Output.ShouldBe("Processed: Test Input");
+        
+        // PostProcessor runs AFTER Send() completes, so it cannot modify the response body.
+        // We verify it ran by calling a separate endpoint that checks the static flag.
+        // Without the source-generated factory, AOT would fail to instantiate the open generic.
+        var (verifyRsp, verifyRes, verifyErr) = await app.Client.GETAsync<VerifyPostProcessorEndpoint, VerifyPostProcessorResponse>();
+        
+        if (!verifyRsp.IsSuccessStatusCode)
+            Assert.Fail(verifyErr);
+            
+        verifyRes.PostProcessorRan.ShouldBeTrue("Generic PostProcessor did not run - source generator factory missing?");
     }
 }
