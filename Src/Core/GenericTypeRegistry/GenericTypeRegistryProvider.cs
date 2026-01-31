@@ -22,6 +22,8 @@ public static class GenericTypeRegistryProvider
     static readonly Dictionary<Type, List<Type>> _eventHandlers = new();
     static readonly Dictionary<(Type OpenGeneric, Type Request), Func<object>> _closedPreProcessorFactories = new();
     static readonly Dictionary<(Type OpenGeneric, Type Request, Type Response), Func<object>> _closedPostProcessorFactories = new();
+    static readonly Dictionary<(Type OpenGenericHandler, Type ClosedCommand), Type> _closedGenericCommandHandlers = new();
+    static readonly Dictionary<(Type OpenGenericHandler, Type ClosedCommand), Func<object>> _closedGenericCommandHandlerFactories = new();
 
     /// <summary>
     /// Registers type information from a source-generated assembly.
@@ -399,5 +401,56 @@ public static class GenericTypeRegistryProvider
             if (kvp.Key.StorageRecord == storageRecordType && kvp.Key.StorageProvider == storageProviderType)
                 yield return kvp.Value;
         }
+    }
+
+    /// <summary>
+    /// Registers pre-computed closed generic command handler type mappings.
+    /// Maps (OpenGenericHandler, ClosedCommand) to ClosedHandlerType.
+    /// </summary>
+    public static void RegisterClosedGenericCommandHandlers(Dictionary<(Type OpenGenericHandler, Type ClosedCommand), Type> handlers)
+    {
+        foreach (var kvp in handlers)
+        {
+            _closedGenericCommandHandlers.TryAdd(kvp.Key, kvp.Value);
+        }
+    }
+
+    /// <summary>
+    /// Registers factory functions for creating closed generic command handler instances.
+    /// </summary>
+    public static void RegisterClosedGenericCommandHandlerFactories(Dictionary<(Type OpenGenericHandler, Type ClosedCommand), Func<object>> factories)
+    {
+        foreach (var kvp in factories)
+        {
+            _closedGenericCommandHandlerFactories.TryAdd(kvp.Key, kvp.Value);
+        }
+    }
+
+    /// <summary>
+    /// Tries to get a pre-computed closed generic command handler type.
+    /// </summary>
+    /// <param name="openGenericHandler">The open generic handler type (e.g., MyHandler&lt;&gt;).</param>
+    /// <param name="closedCommand">The closed command type (e.g., MyCommand&lt;string&gt;).</param>
+    /// <param name="closedHandlerType">The closed handler type if found.</param>
+    /// <returns>True if found; otherwise false.</returns>
+    public static bool TryGetClosedGenericCommandHandler(Type openGenericHandler, Type closedCommand, out Type? closedHandlerType)
+        => _closedGenericCommandHandlers.TryGetValue((openGenericHandler, closedCommand), out closedHandlerType);
+
+    /// <summary>
+    /// Tries to create a closed generic command handler instance using an AOT-safe factory.
+    /// </summary>
+    /// <param name="openGenericHandler">The open generic handler type (e.g., MyHandler&lt;&gt;).</param>
+    /// <param name="closedCommand">The closed command type (e.g., MyCommand&lt;string&gt;).</param>
+    /// <param name="instance">The created handler instance if found.</param>
+    /// <returns>True if the factory was found and instance created; otherwise false.</returns>
+    public static bool TryCreateClosedGenericCommandHandler(Type openGenericHandler, Type closedCommand, out object? instance)
+    {
+        if (_closedGenericCommandHandlerFactories.TryGetValue((openGenericHandler, closedCommand), out var factory))
+        {
+            instance = factory();
+            return true;
+        }
+        instance = null;
+        return false;
     }
 }

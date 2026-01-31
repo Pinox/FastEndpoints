@@ -52,6 +52,54 @@ public sealed class GenericTypeRegistryGenerator : IIncrementalGenerator
             => (CommandType, HandlerType).GetHashCode();
     }
 
+    /// <summary>
+    /// Info for open generic command handlers like GenericHandler{T} : ICommandHandler{GenericCommand{T}, TResult}
+    /// </summary>
+    sealed class OpenGenericCommandHandlerInfo
+    {
+        public string OpenHandlerType { get; }
+        public string OpenCommandType { get; }
+        public string? ResultType { get; }
+        public int TypeParamCount { get; }
+
+        public OpenGenericCommandHandlerInfo(string openHandlerType, string openCommandType, string? resultType, int typeParamCount)
+        {
+            OpenHandlerType = openHandlerType;
+            OpenCommandType = openCommandType;
+            ResultType = resultType;
+            TypeParamCount = typeParamCount;
+        }
+
+        public override bool Equals(object? obj)
+            => obj is OpenGenericCommandHandlerInfo other && OpenHandlerType == other.OpenHandlerType;
+
+        public override int GetHashCode()
+            => OpenHandlerType.GetHashCode();
+    }
+
+    /// <summary>
+    /// Info for closed generic command usages like new GenericCommand{string}()
+    /// </summary>
+    sealed class ClosedGenericCommandInfo
+    {
+        public string OpenCommandType { get; }
+        public string ClosedCommandType { get; }
+        public List<string> TypeArguments { get; }
+
+        public ClosedGenericCommandInfo(string openCommandType, string closedCommandType, List<string> typeArguments)
+        {
+            OpenCommandType = openCommandType;
+            ClosedCommandType = closedCommandType;
+            TypeArguments = typeArguments;
+        }
+
+        public override bool Equals(object? obj)
+            => obj is ClosedGenericCommandInfo other && ClosedCommandType == other.ClosedCommandType;
+
+        public override int GetHashCode()
+            => ClosedCommandType.GetHashCode();
+    }
+
     sealed class EventHandlerInfo
     {
         public string EventType { get; }
@@ -149,6 +197,18 @@ public sealed class GenericTypeRegistryGenerator : IIncrementalGenerator
             .Where(static x => x is not null)
             .Collect();
 
+        // Discover open generic command handlers
+        var openGenericCommandHandlers = context.SyntaxProvider
+            .CreateSyntaxProvider(IsCandidate, ExtractOpenGenericCommandHandler)
+            .Where(static x => x is not null)
+            .Collect();
+
+        // Discover closed generic command usages (instantiations)
+        var closedGenericCommands = context.SyntaxProvider
+            .CreateSyntaxProvider(IsObjectCreation, ExtractClosedGenericCommand)
+            .Where(static x => x is not null)
+            .Collect();
+
         // Discover event handlers
         var eventHandlers = context.SyntaxProvider
             .CreateSyntaxProvider(IsCandidate, ExtractEventHandler)
@@ -176,6 +236,8 @@ public sealed class GenericTypeRegistryGenerator : IIncrementalGenerator
         // Combine all
         var combined = assemblyNameProvider
             .Combine(commandHandlers)
+            .Combine(openGenericCommandHandlers)
+            .Combine(closedGenericCommands)
             .Combine(eventHandlers)
             .Combine(processors)
             .Combine(endpoints)
@@ -255,7 +317,7 @@ public sealed class GenericTypeRegistryGenerator : IIncrementalGenerator
         if (HasAttribute(typeSymbol, DontRegisterAttribute))
             return null;
 
-        // Skip open generic handlers - they can't be directly mapped
+        // Skip open generic handlers - they are handled separately
         if (typeSymbol.IsGenericType)
             return null;
 
@@ -281,6 +343,103 @@ public sealed class GenericTypeRegistryGenerator : IIncrementalGenerator
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// Extracts open generic command handlers like GenericHandler{T} : ICommandHandler{GenericCommand{T}, string}
+    /// </summary>
+    static OpenGenericCommandHandlerInfo? ExtractOpenGenericCommandHandler(GeneratorSyntaxContext context, CancellationToken ct)
+    {
+        if (context.SemanticModel.GetDeclaredSymbol(context.Node, ct) is not INamedTypeSymbol typeSymbol)
+            return null;
+
+        if (typeSymbol.IsAbstract || !typeSymbol.IsGenericType)
+            return null;
+
+        if (HasAttribute(typeSymbol, DontRegisterAttribute))
+            return null;
+
+        foreach (var iface in typeSymbol.AllInterfaces)
+        {
+            var ifaceStr = iface.OriginalDefinition.ToDisplayString();
+
+            if (ifaceStr == ICommandHandlerOf2 && iface.TypeArguments.Length == 2)
+            {
+                var commandType = iface.TypeArguments[0];
+                var resultType = iface.TypeArguments[1];
+
+                // Check if the command type uses the handler's type parameter
+                if (commandType is INamedTypeSymbol namedCmdType && namedCmdType.IsGenericType)
+                {
+                    // Skip if result type contains type parameters (too complex to substitute)
+                    // For example: ICommandHandler<GenericCmd<T>, IEnumerable<T>> would have T in result
+                    if (ContainsTypeParameter(resultType))
+                        continue;
+
+                    // This is an open generic handler with concrete result type
+                    return new OpenGenericCommandHandlerInfo(
+                        typeSymbol.ToDisplayString(),
+                        namedCmdType.OriginalDefinition.ToDisplayString(),
+                        resultType.ToDisplayString(),
+                        typeSymbol.TypeParameters.Length);
+                }
+            }
+
+            if (ifaceStr == ICommandHandlerOf1 && iface.TypeArguments.Length == 1)
+            {
+                var commandType = iface.TypeArguments[0];
+
+                if (commandType is INamedTypeSymbol namedCmdType && namedCmdType.IsGenericType)
+                {
+                    return new OpenGenericCommandHandlerInfo(
+                        typeSymbol.ToDisplayString(),
+                        namedCmdType.OriginalDefinition.ToDisplayString(),
+                        null,
+                        typeSymbol.TypeParameters.Length);
+                }
+            }
+        }
+
+        return null;
+    }
+
+    static bool IsObjectCreation(SyntaxNode node, CancellationToken _)
+        => node is ObjectCreationExpressionSyntax or ImplicitObjectCreationExpressionSyntax;
+
+    /// <summary>
+    /// Extracts closed generic command instantiations like new GenericCommand{string}()
+    /// </summary>
+    static ClosedGenericCommandInfo? ExtractClosedGenericCommand(GeneratorSyntaxContext context, CancellationToken ct)
+    {
+        ITypeSymbol? typeSymbol = null;
+
+        if (context.Node is ObjectCreationExpressionSyntax objCreation)
+        {
+            typeSymbol = context.SemanticModel.GetTypeInfo(objCreation, ct).Type;
+        }
+        else if (context.Node is ImplicitObjectCreationExpressionSyntax implicitCreation)
+        {
+            typeSymbol = context.SemanticModel.GetTypeInfo(implicitCreation, ct).Type;
+        }
+
+        if (typeSymbol is not INamedTypeSymbol namedType || !namedType.IsGenericType)
+            return null;
+
+        // Check if this type implements ICommand<>
+        var implementsICommand = namedType.AllInterfaces.Any(i =>
+        {
+            var ifaceStr = i.OriginalDefinition.ToDisplayString();
+            return ifaceStr == "FastEndpoints.ICommand<TResult>" || ifaceStr == "FastEndpoints.ICommand";
+        });
+
+        if (!implementsICommand)
+            return null;
+
+        var openType = namedType.OriginalDefinition.ToDisplayString();
+        var closedType = namedType.ToDisplayString();
+        var typeArgs = namedType.TypeArguments.Select(t => t.ToDisplayString()).ToList();
+
+        return new ClosedGenericCommandInfo(openType, closedType, typeArgs);
     }
 
     static ProcessorInfo? ExtractProcessor(GeneratorSyntaxContext context, CancellationToken ct)
@@ -471,17 +630,56 @@ public sealed class GenericTypeRegistryGenerator : IIncrementalGenerator
         return false;
     }
 
+    /// <summary>
+    /// Checks if a type symbol contains any type parameters.
+    /// </summary>
+    static bool ContainsTypeParameter(ITypeSymbol typeSymbol)
+    {
+        if (typeSymbol.TypeKind == TypeKind.TypeParameter)
+            return true;
+
+        if (typeSymbol is INamedTypeSymbol namedType)
+        {
+            foreach (var typeArg in namedType.TypeArguments)
+            {
+                if (ContainsTypeParameter(typeArg))
+                    return true;
+            }
+        }
+
+        if (typeSymbol is IArrayTypeSymbol arrayType)
+        {
+            return ContainsTypeParameter(arrayType.ElementType);
+        }
+
+        return false;
+    }
+
     static void GenerateSource(
         SourceProductionContext context,
-        (((((string AssemblyName, ImmutableArray<CommandHandlerInfo?> Handlers), ImmutableArray<EventHandlerInfo?> Events), ImmutableArray<ProcessorInfo?> Processors), ImmutableArray<EndpointInfo?> Endpoints), ImmutableArray<JobStorageProviderInfo?> JobStorageProviders) data)
+        (((((((string AssemblyName, ImmutableArray<CommandHandlerInfo?> Handlers), ImmutableArray<OpenGenericCommandHandlerInfo?> OpenGenericHandlers), ImmutableArray<ClosedGenericCommandInfo?> ClosedGenericCommands), ImmutableArray<EventHandlerInfo?> Events), ImmutableArray<ProcessorInfo?> Processors), ImmutableArray<EndpointInfo?> Endpoints), ImmutableArray<JobStorageProviderInfo?> JobStorageProviders) data)
     {
-        var assemblyName = data.Item1.Item1.Item1.Item1.AssemblyName;
+        var assemblyName = data.Item1.Item1.Item1.Item1.Item1.Item1.AssemblyName;
 
-        var handlers = data.Item1.Item1.Item1.Item1.Handlers
+        var handlers = data.Item1.Item1.Item1.Item1.Item1.Item1.Handlers
             .Where(x => x is not null)
             .Cast<CommandHandlerInfo>()
             .Distinct()
             .OrderBy(x => x.CommandType)
+            .ToImmutableArray();
+
+        var openGenericHandlers = data.Item1.Item1.Item1.Item1.Item1.OpenGenericHandlers
+            .Where(x => x is not null)
+            .Cast<OpenGenericCommandHandlerInfo>()
+            .Distinct()
+            .OrderBy(x => x.OpenHandlerType)
+            .ToImmutableArray();
+
+        var closedGenericCommands = data.Item1.Item1.Item1.Item1.ClosedGenericCommands
+            .Where(x => x is not null)
+            .Cast<ClosedGenericCommandInfo>()
+            .Distinct()
+            .OrderBy(x => x.ClosedCommandType)
             .ToImmutableArray();
 
         var eventHandlers = data.Item1.Item1.Item1.Events
@@ -512,16 +710,18 @@ public sealed class GenericTypeRegistryGenerator : IIncrementalGenerator
             .OrderBy(x => x.StorageProviderType)
             .ToImmutableArray();
 
-        if (handlers.Length == 0 && eventHandlers.Length == 0 && processors.Length == 0 && endpoints.Length == 0)
+        if (handlers.Length == 0 && eventHandlers.Length == 0 && processors.Length == 0 && endpoints.Length == 0 && openGenericHandlers.Length == 0)
             return;
 
-        var source = GenerateRegistryClass(assemblyName, handlers, eventHandlers, processors, endpoints, jobStorageProviders);
+        var source = GenerateRegistryClass(assemblyName, handlers, openGenericHandlers, closedGenericCommands, eventHandlers, processors, endpoints, jobStorageProviders);
         context.AddSource("GenericTypeRegistry.g.cs", SourceText.From(source, Encoding.UTF8));
     }
 
     static string GenerateRegistryClass(
         string assemblyName,
         ImmutableArray<CommandHandlerInfo> handlers,
+        ImmutableArray<OpenGenericCommandHandlerInfo> openGenericHandlers,
+        ImmutableArray<ClosedGenericCommandInfo> closedGenericCommands,
         ImmutableArray<EventHandlerInfo> eventHandlers,
         ImmutableArray<ProcessorInfo> processors,
         ImmutableArray<EndpointInfo> endpoints,
@@ -857,6 +1057,41 @@ public sealed class GenericTypeRegistryGenerator : IIncrementalGenerator
             sb.AppendLine($"        [typeof({handler.CommandType})] = typeof(FastEndpoints.ICommandHandler<{handler.CommandType}, {handler.ResultType}>),");
         }
 
+        // Also add interface mappings for closed generic commands
+        var closedGenericInterfaceEntries = new HashSet<string>();
+        foreach (var openHandler in openGenericHandlers)
+        {
+            var openCommandBase = GetOpenGenericBaseTypeName(openHandler.OpenCommandType);
+
+            foreach (var closedCmd in closedGenericCommands)
+            {
+                var closedCmdBase = GetOpenGenericBaseTypeName(closedCmd.OpenCommandType);
+                if (openCommandBase == closedCmdBase)
+                {
+                    // Determine if handler has result type
+                    if (openHandler.ResultType == null)
+                    {
+                        var entry = $"[typeof({closedCmd.ClosedCommandType})] = typeof(FastEndpoints.ICommandHandler<{closedCmd.ClosedCommandType}>)";
+                        closedGenericInterfaceEntries.Add(entry);
+                    }
+                    else
+                    {
+                        // Substitute type arguments in result type if needed
+                        var resultType = openHandler.ResultType;
+                        // If result type contains generic parameters, substitute them
+                        // For now, assume result type is either a concrete type or uses the same type args
+                        var typeArgs = string.Join(", ", closedCmd.TypeArguments);
+                        var entry = $"[typeof({closedCmd.ClosedCommandType})] = typeof(FastEndpoints.ICommandHandler<{closedCmd.ClosedCommandType}, {resultType}>)";
+                        closedGenericInterfaceEntries.Add(entry);
+                    }
+                }
+            }
+        }
+        foreach (var entry in closedGenericInterfaceEntries.OrderBy(x => x))
+        {
+            sb.AppendLine($"        {entry},");
+        }
+
         sb.AppendLine("""
                 };
 
@@ -891,6 +1126,72 @@ public sealed class GenericTypeRegistryGenerator : IIncrementalGenerator
         {
             var types = string.Join(", ", kvp.Value.Select(t => $"typeof({t})"));
             sb.AppendLine($"        [typeof({kvp.Key})] = [{types}],");
+        }
+
+        sb.AppendLine("""
+                };
+
+                /// <summary>
+                /// Maps (openHandlerType, closedCommandType) to closed generic handler types.
+                /// </summary>
+                public static readonly Dictionary<(Type, Type), Type> ClosedGenericCommandHandlers = new()
+                {
+            """);
+
+        // Generate closed generic command handler types by matching open generic handlers with discovered closed commands
+        foreach (var openHandler in openGenericHandlers)
+        {
+            var openHandlerBase = GetOpenGenericBaseTypeName(openHandler.OpenHandlerType);
+            var openCommandBase = GetOpenGenericBaseTypeName(openHandler.OpenCommandType);
+            var unboundedHandler = ToUnboundedGenericSyntax(openHandler.OpenHandlerType, openHandler.TypeParamCount);
+
+            // Match with closed command usages
+            foreach (var closedCmd in closedGenericCommands)
+            {
+                var closedCmdBase = GetOpenGenericBaseTypeName(closedCmd.OpenCommandType);
+                if (openCommandBase == closedCmdBase)
+                {
+                    // Build the closed handler type with the same type arguments
+                    var typeArgs = string.Join(", ", closedCmd.TypeArguments);
+                    var closedHandlerType = $"{openHandlerBase}<{typeArgs}>";
+                    sb.AppendLine($"        [(typeof({unboundedHandler}), typeof({closedCmd.ClosedCommandType}))] = typeof({closedHandlerType}),");
+                }
+            }
+        }
+
+        sb.AppendLine("""
+                };
+
+                /// <summary>
+                /// Factory functions for creating closed generic command handler instances.
+                /// </summary>
+                public static readonly Dictionary<(Type, Type), Func<object>> ClosedGenericCommandHandlerFactories = new()
+                {
+            """);
+
+        // Generate factory functions for closed generic command handlers
+        var commandHandlerFactoryEntries = new HashSet<string>();
+        foreach (var openHandler in openGenericHandlers)
+        {
+            var openHandlerBase = GetOpenGenericBaseTypeName(openHandler.OpenHandlerType);
+            var openCommandBase = GetOpenGenericBaseTypeName(openHandler.OpenCommandType);
+            var unboundedHandler = ToUnboundedGenericSyntax(openHandler.OpenHandlerType, openHandler.TypeParamCount);
+
+            foreach (var closedCmd in closedGenericCommands)
+            {
+                var closedCmdBase = GetOpenGenericBaseTypeName(closedCmd.OpenCommandType);
+                if (openCommandBase == closedCmdBase)
+                {
+                    var typeArgs = string.Join(", ", closedCmd.TypeArguments);
+                    var closedHandlerType = $"{openHandlerBase}<{typeArgs}>";
+                    var entry = $"[(typeof({unboundedHandler}), typeof({closedCmd.ClosedCommandType}))] = () => new {closedHandlerType}()";
+                    commandHandlerFactoryEntries.Add(entry);
+                }
+            }
+        }
+        foreach (var entry in commandHandlerFactoryEntries.OrderBy(x => x))
+        {
+            sb.AppendLine($"        {entry},");
         }
 
         sb.AppendLine("""
@@ -934,6 +1235,8 @@ public sealed class GenericTypeRegistryGenerator : IIncrementalGenerator
                     FastEndpoints.GenericTypeRegistryProvider.RegisterCommandHandlerInterfaces(CommandHandlerInterfaces);
                     FastEndpoints.GenericTypeRegistryProvider.RegisterEventBusTypes(EventBusTypes);
                     FastEndpoints.GenericTypeRegistryProvider.RegisterEventHandlers(EventHandlers);
+                    FastEndpoints.GenericTypeRegistryProvider.RegisterClosedGenericCommandHandlers(ClosedGenericCommandHandlers);
+                    FastEndpoints.GenericTypeRegistryProvider.RegisterClosedGenericCommandHandlerFactories(ClosedGenericCommandHandlerFactories);
                     // Note: JobQueueTypes and JobQueueFactories not registered - JobQueue<> is internal
                 }
             }

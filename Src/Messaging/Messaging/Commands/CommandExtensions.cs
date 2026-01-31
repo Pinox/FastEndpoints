@@ -163,11 +163,35 @@ public static class CommandExtensions
         if (!registry.TryGetValue(tGenCmd, out var genDef))
             throw new InvalidOperationException($"No generic handler registered for generic command type: [{tGenCmd.FullName}]");
 
-        var tHnd = genDef.HandlerType.MakeGenericType(tCommand.GetGenericArguments());
+        // Try AOT-safe factory lookup first (uses source-generated factories)
+        Type tHnd;
+        if (GenericTypeRegistryProvider.TryGetClosedGenericCommandHandler(genDef.HandlerType.GetGenericTypeDefinition(), tCommand, out var closedHandlerType) &&
+            closedHandlerType is not null)
+        {
+            tHnd = closedHandlerType;
+        }
+        else
+        {
+            // Fall back to reflection-based approach (will fail in AOT if type not preserved)
+            tHnd = genDef.HandlerType.MakeGenericType(tCommand.GetGenericArguments());
+        }
+
         var tRes = typeof(TResult);
-        var tTargetIfc = tRes == Types.VoidResult
+
+        // Try AOT-safe interface lookup first
+        Type tTargetIfc;
+        if (GenericTypeRegistryProvider.TryGetCommandHandlerInterface(tCommand, out var ifcType) &&
+            ifcType is not null)
+        {
+            tTargetIfc = ifcType;
+        }
+        else
+        {
+            // Fall back to reflection-based approach
+            tTargetIfc = tRes == Types.VoidResult
                              ? Types.ICommandHandlerOf1.MakeGenericType(tCommand)
                              : Types.ICommandHandlerOf2.MakeGenericType(tCommand, tRes);
+        }
 
         if (!tHnd.IsAssignableTo(tTargetIfc))
             throw new InvalidOperationException($"The registered generic handler for the generic command [{tGenCmd.FullName}] is not the correct type!");

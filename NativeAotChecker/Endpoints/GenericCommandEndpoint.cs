@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace NativeAotChecker.Endpoints;
 
 /// <summary>
@@ -12,6 +14,7 @@ sealed class GenericCommandEndpoint : EndpointWithoutRequest<GenericCommandRespo
     {
         Get("generic-command");
         AllowAnonymous();
+        SerializerContext<GenericCommandSerCtx>();
     }
 
     public override async Task<GenericCommandResponse> ExecuteAsync(CancellationToken ct)
@@ -32,7 +35,7 @@ sealed class GenericCommandEndpoint : EndpointWithoutRequest<GenericCommandRespo
     }
 }
 
-sealed class GenericCommandResponse
+public sealed class GenericCommandResponse
 {
     public string StringResult { get; set; } = "";
     public string IntResult { get; set; } = "";
@@ -59,3 +62,6 @@ sealed class GenericWrapperCommandHandler<T> : ICommandHandler<GenericWrapperCom
         return Task.FromResult($"Wrapped {typeName}: {cmd.Value}");
     }
 }
+
+[JsonSerializable(typeof(GenericCommandResponse))]
+public partial class GenericCommandSerCtx : JsonSerializerContext;

@@ -18,8 +18,7 @@ sealed class CommandHandlerExecutor<TCommand, TResult>(IEnumerable<ICommandMiddl
     {
         commandReceiver?.AddCommand((TCommand)command);
 
-        var cmdHandler = TestHandler ?? //TestHandler is not null for unit tests
-                         (ICommandHandler<TCommand, TResult>)ServiceResolver.Instance.CreateInstance(tCommandHandler);
+        var cmdHandler = TestHandler ?? CreateHandler(tCommandHandler);
 
         return InvokeMiddleware(0);
 
@@ -32,5 +31,26 @@ sealed class CommandHandlerExecutor<TCommand, TResult>(IEnumerable<ICommandMiddl
                            () => InvokeMiddleware(index + 1),
                            ct);
         }
+    }
+
+    ICommandHandler<TCommand, TResult> CreateHandler(Type tCommandHandler)
+    {
+        var tCommand = typeof(TCommand);
+
+        // For generic command handlers, try AOT-safe factory first
+        if (tCommandHandler.IsGenericType && !tCommandHandler.IsGenericTypeDefinition)
+        {
+            var tOpenHandler = tCommandHandler.GetGenericTypeDefinition();
+
+            // Try to create the handler using the source-generated factory
+            if (GenericTypeRegistryProvider.TryCreateClosedGenericCommandHandler(tOpenHandler, tCommand, out var handlerInstance) &&
+                handlerInstance is not null)
+            {
+                return (ICommandHandler<TCommand, TResult>)handlerInstance;
+            }
+        }
+
+        // Fall back to reflection-based creation (will fail in AOT if type not preserved)
+        return (ICommandHandler<TCommand, TResult>)ServiceResolver.Instance.CreateInstance(tCommandHandler);
     }
 }
